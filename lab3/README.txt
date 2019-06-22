@@ -1,6 +1,13 @@
 This file contains materials for one instance of the attacklab.
 
 Files:
+    exploit-raw*.txt
+    
+The answers.
+
+    my_analysis.txt
+    
+Nodes that I took when solving the problems.
 
     ctarget
 
